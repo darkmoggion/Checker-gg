@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Checker de Cartões com Proxy</title>
+<style>
+  body { background: #121212; color: #eee; font-family: monospace; padding: 1rem; }
+  textarea { width: 100%; height: 100px; background: #222; border: none; color: #eee; padding: 0.5rem; font-family: monospace; }
+  .container { max-width: 800px; margin: auto; }
+  button { margin: 0.5rem 0.25rem; padding: 0.5rem 1rem; background: #444; border: none; color: #eee; cursor: pointer; border-radius: 4px; }
+  button:hover { background: #666; }
+  h2 { margin-top: 1rem; border-bottom: 1px solid #444; padding-bottom: 0.25rem; }
+  .output { background: #222; padding: 0.5rem; height: 200px; overflow-y: auto; white-space: pre-wrap; border-radius: 4px; }
+  .flex { display: flex; gap: 0.5rem; }
+  .flex > div { flex: 1; }
+  .status-live { color: #4CAF50; }
+  .status-die { color: #f44336; }
+  .status-proxy-error { color: #ff9800; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Checker de Cartões com Proxy</h1>
+
+  <label for="lista">Lista de Cartões (formato: 4111111111111111|12|2025|123)</label>
+  <textarea id="lista" placeholder="Cole sua lista aqui, uma por linha"></textarea>
+
+  <label for="proxies">Proxies (formato: ip:porta)</label>
+  <textarea id="proxies" placeholder="Cole proxies aqui, uma por linha"></textarea>
+
+  <div class="flex">
+    <button id="startBtn">Iniciar Check</button>
+    <button id="stopBtn" disabled>Parar</button>
+    <button id="copyLivesBtn">Copiar Lives</button>
+    <button id="clearDiesBtn">Excluir Dies</button>
+    <button id="clearSessionBtn">Limpar Sessão (Recarregar)</button>
+  </div>
+
+  <h2>Lives</h2>
+  <pre id="lives" class="output status-live"></pre>
+
+  <h2>Dies</h2>
+  <pre id="dies" class="output status-die"></pre>
+
+  <h2>Erros de Proxy</h2>
+  <pre id="proxyErrors" class="output status-proxy-error"></pre>
+</div>
+
+<script>
+const listaEl = document.getElementById('lista');
+const proxiesEl = document.getElementById('proxies');
+const livesEl = document.getElementById('lives');
+const diesEl = document.getElementById('dies');
+const proxyErrorsEl = document.getElementById('proxyErrors');
+
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const copyLivesBtn = document.getElementById('copyLivesBtn');
+const clearDiesBtn = document.getElementById('clearDiesBtn');
+const clearSessionBtn = document.getElementById('clearSessionBtn');
+
+let running = false;
+let cards = [];
+let proxies = [];
+let proxyIndex = 0;
+let proxyUseCount = 0;
+const proxyUseLimit = 10;
+const delayMs = 3000; // delay entre testes, em ms
+
+function appendText(el, text) {
+  el.textContent += text + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+function extractMessage(text) {
+  // Tenta pegar mensagem clara de "errors":"..."
+  const re = /"errors"\s*:\s*"([^"]+)"/i;
+  const m = text.match(re);
+  if (m && m[1]) return m[1];
+  return text.replace(/<[^>]+>/g, '').trim(); // Remove tags HTML
+}
+
+async function testCard(card, proxy) {
+  try {
+    const url = new URL('api.php', window.location.href);
+    url.searchParams.set('lista', card);
+    if(proxy) url.searchParams.set('proxy', proxy);
+
+    const start = performance.now();
+    const res = await fetch(url.toString(), { method: 'GET' });
+    const text = await res.text();
+    const duration = ((performance.now() - start) / 1000).toFixed(2);
+    const lowerText = text.toLowerCase();
+
+    if (lowerText.includes('approved') || lowerText.includes('cvv2 declined')) {
+      appendText(livesEl, `LIVE = ${card} ➔ ${extractMessage(text)} ➔ (${duration}s) @PATRIOTA171 | @LOUCO DAS GGS`);
+      return 'live';
+    }
+
+    // Aqui o que você pediu: seu caso especial "Your card was declined." com token=null é live
+    if (lowerText.includes('your card was declined') && lowerText.includes('"token":null')) {
+      appendText(livesEl, `LIVE = ${card} ➔ Your card was declined ➔ (${duration}s) @PATRIOTA171 | @LOUCO DAS GGS`);
+      return 'live';
+    }
+
+    if (lowerText.includes('proxy') || lowerText.includes('failed to connect') || lowerText.includes('could not')) {
+      appendText(proxyErrorsEl, `Proxy ${proxy} erro: ${text.trim()}`);
+      return 'proxy_error';
+    }
+
+    // Dies genéricos
+    if (lowerText.includes('must be a valid credit card number') ||
+        lowerText.includes('reprovada') || 
+        lowerText.includes('declined')) {
+      appendText(diesEl, `DIE = ${card} ➔ ${extractMessage(text)} ➔ (${duration}s) @PATRIOTA171 |  @LOUCO DAS GGS`);
+      return 'die';
+    }
+
+    // Qualquer outro resultado considerar DIE
+    appendText(diesEl, `DIE = ${card} ➔ ${extractMessage(text)} ➔ (${duration}s) @PATRIOTA171 | @LOUCO DAS GGS`);
+    return 'die';
+
+  } catch (e) {
+    appendText(proxyErrorsEl, `Erro inesperado com proxy ${proxy}: ${e.message}`);
+    return 'proxy_error';
+  }
+}
+
+async function runChecker() {
+  running = true;
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+
+  while (running && cards.length > 0) {
+    if (proxyUseCount >= proxyUseLimit) {
+      proxyIndex++;
+      proxyUseCount = 0;
+      if (proxyIndex >= proxies.length) proxyIndex = 0;
+    }
+    const currentProxy = proxies.length > 0 ? proxies[proxyIndex] : null;
+    const card = cards.shift();
+    proxyUseCount++;
+
+    await testCard(card, currentProxy);
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+}
+
+startBtn.addEventListener('click', () => {
+  if (running) return;
+  // Pega lista e proxies, limpa saídas e prepara para rodar
+  cards = listaEl.value.trim().split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  proxies = proxiesEl.value.trim().split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  proxyIndex = 0;
+  proxyUseCount = 0;
+
+  livesEl.textContent = '';
+  diesEl.textContent = '';
+  proxyErrorsEl.textContent = '';
+
+  if (cards.length === 0) {
+    alert('Cole a lista de cartões.');
+    startBtn.disabled = false;
+    return;
+  }
+
+  running = true;
+  runChecker();
+});
+
+stopBtn.addEventListener('click', () => {
+  running = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+});
+
+copyLivesBtn.addEventListener('click', () => {
+  if (livesEl.textContent.trim() === '') {
+    alert('Não há lives para copiar.');
+    return;
+  }
+  navigator.clipboard.writeText(livesEl.textContent.trim()).then(() => {
+    alert('Lives copiadas para área de transferência!');
+  });
+});
+
+clearDiesBtn.addEventListener('click', () => {
+  diesEl.textContent = '';
+});
+
+clearSessionBtn.addEventListener('click', () => {
+  location.reload();
+});
+</script>
+</body>
+</html>
